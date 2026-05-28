@@ -5,6 +5,11 @@
   const ctx = canvas.getContext("2d");
   const scoreEl = document.getElementById("score");
   const livesEl = document.getElementById("lives");
+  const powerEl = document.createElement("span");
+
+  powerEl.id = "power";
+  powerEl.textContent = "Power: None";
+  livesEl.insertAdjacentElement("afterend", powerEl);
 
   const Game = {
     width: canvas.width,
@@ -15,6 +20,10 @@
     lastTime: 0,
     spawnTimer: 0,
     fireCooldown: 0,
+    elapsedTime: 0,
+    kills: 0,
+    bossSpawned: false,
+    bossActive: false,
     keys: Object.create(null),
     stars: [],
     player: {
@@ -25,7 +34,11 @@
       speed: 285
     },
     bullets: [],
+    enemyBullets: [],
     enemies: [],
+    powerUps: [],
+    spreadTimer: 0,
+    shield: false,
     enemyTypes: [
       { name: "basic", w: 34, h: 32, speed: 95, hp: 1, score: 100, color: "#4db5ff" },
       { name: "fast", w: 24, h: 24, speed: 170, hp: 1, score: 150, color: "#ffe05c" },
@@ -45,8 +58,16 @@
       this.lives = 3;
       this.spawnTimer = 0;
       this.fireCooldown = 0;
+      this.elapsedTime = 0;
+      this.kills = 0;
+      this.bossSpawned = false;
+      this.bossActive = false;
       this.bullets.length = 0;
+      this.enemyBullets.length = 0;
       this.enemies.length = 0;
+      this.powerUps.length = 0;
+      this.spreadTimer = 0;
+      this.shield = false;
       this.player.x = this.width / 2 - this.player.w / 2;
       this.player.y = this.height - 76;
       this.updateHud();
@@ -105,12 +126,23 @@
 
       this.movePlayer(delta);
       this.updateBullets(delta);
+      this.updateEnemyBullets(delta);
       this.updateEnemies(delta);
-      this.spawnTimer += delta * 1000;
+      this.updatePowerUps(delta);
+      this.elapsedTime += delta;
+      this.spreadTimer = Math.max(0, this.spreadTimer - delta);
 
-      if (this.spawnTimer >= 800) {
-        this.spawnTimer = 0;
-        this.spawnEnemy();
+      if (!this.bossSpawned && (this.elapsedTime >= 60 || this.kills >= 30)) {
+        this.spawnBoss();
+      }
+
+      if (!this.bossActive) {
+        this.spawnTimer += delta * 1000;
+
+        if (this.spawnTimer >= 800) {
+          this.spawnTimer = 0;
+          this.spawnEnemy();
+        }
       }
 
       this.handleCollisions();
@@ -152,34 +184,87 @@
     },
 
     fireBullet() {
-      this.bullets.push({
-        x: this.player.x + this.player.w / 2 - 3,
-        y: this.player.y - 12,
-        w: 6,
-        h: 16,
-        speed: 430
-      });
+      const centerX = this.player.x + this.player.w / 2 - 3;
+      const originY = this.player.y - 12;
+      const shots = this.spreadTimer > 0 ? [-145, 0, 145] : [0];
+
+      for (const vx of shots) {
+        this.bullets.push({
+          x: centerX,
+          y: originY,
+          w: 6,
+          h: 16,
+          vx,
+          vy: -430
+        });
+      }
     },
 
     updateBullets(delta) {
       for (const bullet of this.bullets) {
-        bullet.y -= bullet.speed * delta;
+        bullet.x += (bullet.vx || 0) * delta;
+        bullet.y += (bullet.vy || -bullet.speed) * delta;
       }
-      this.bullets = this.bullets.filter((bullet) => bullet.y + bullet.h > 0);
+      this.bullets = this.bullets.filter((bullet) => (
+        bullet.y + bullet.h > 0 &&
+        bullet.x + bullet.w > 0 &&
+        bullet.x < this.width
+      ));
+    },
+
+    updateEnemyBullets(delta) {
+      for (const bullet of this.enemyBullets) {
+        bullet.x += bullet.vx * delta;
+        bullet.y += bullet.vy * delta;
+      }
+
+      this.enemyBullets = this.enemyBullets.filter((bullet) => (
+        bullet.y < this.height + bullet.h &&
+        bullet.x + bullet.w > 0 &&
+        bullet.x < this.width
+      ));
     },
 
     updateEnemies(delta) {
       for (const enemy of this.enemies) {
+        if (enemy.isBoss) {
+          enemy.y = Math.min(enemy.y + enemy.speed * delta, 42);
+          enemy.x += enemy.vx * delta;
+          if (enemy.x <= 0 || enemy.x + enemy.w >= this.width) {
+            enemy.x = this.clamp(enemy.x, 0, this.width - enemy.w);
+            enemy.vx *= -1;
+          }
+
+          enemy.fireTimer -= delta;
+          if (enemy.fireTimer <= 0) {
+            this.fireBossPattern(enemy);
+            enemy.fireTimer = 1.25;
+          }
+          continue;
+        }
+
         enemy.y += enemy.speed * delta;
       }
 
       this.enemies = this.enemies.filter((enemy) => {
+        if (enemy.isBoss) {
+          return true;
+        }
         if (enemy.y <= this.height) {
           return true;
         }
         this.loseLife();
         return false;
       });
+    },
+
+    updatePowerUps(delta) {
+      for (const powerUp of this.powerUps) {
+        powerUp.y += powerUp.speed * delta;
+        powerUp.spin += delta * 6;
+      }
+
+      this.powerUps = this.powerUps.filter((powerUp) => powerUp.y <= this.height + powerUp.h);
     },
 
     spawnEnemy() {
@@ -200,6 +285,64 @@
       });
     },
 
+    spawnBoss() {
+      this.bossSpawned = true;
+      this.bossActive = true;
+      this.spawnTimer = 0;
+      this.enemies.length = 0;
+      this.enemyBullets.length = 0;
+
+      this.enemies.push({
+        name: "boss",
+        isBoss: true,
+        x: this.width / 2 - 72,
+        y: -96,
+        w: 144,
+        h: 82,
+        speed: 58,
+        vx: 118,
+        hp: 30,
+        maxHp: 30,
+        score: 500,
+        color: "#ff4f7d",
+        fireTimer: 0.8
+      });
+    },
+
+    fireBossPattern(boss) {
+      const centerX = boss.x + boss.w / 2 - 4;
+      const startY = boss.y + boss.h - 4;
+      const spread = [-150, -75, 0, 75, 150];
+
+      for (const vx of spread) {
+        this.enemyBullets.push({
+          x: centerX,
+          y: startY,
+          w: 8,
+          h: 14,
+          vx,
+          vy: 205
+        });
+      }
+    },
+
+    dropPowerUp(enemy) {
+      if (enemy.isBoss || Math.random() >= 0.05) {
+        return;
+      }
+
+      const type = Math.random() < 0.5 ? "spread" : "shield";
+      this.powerUps.push({
+        type,
+        x: enemy.x + enemy.w / 2 - 9,
+        y: enemy.y + enemy.h / 2 - 9,
+        w: 18,
+        h: 18,
+        speed: 95,
+        spin: 0
+      });
+    },
+
     handleCollisions() {
       for (let bulletIndex = this.bullets.length - 1; bulletIndex >= 0; bulletIndex -= 1) {
         const bullet = this.bullets[bulletIndex];
@@ -216,17 +359,59 @@
           if (enemy.hp <= 0) {
             this.enemies.splice(enemyIndex, 1);
             this.score += enemy.score;
+            if (enemy.isBoss) {
+              this.bossActive = false;
+              this.spawnTimer = 650;
+            } else {
+              this.kills += 1;
+              this.dropPowerUp(enemy);
+            }
           }
           break;
         }
       }
 
-      for (let enemyIndex = this.enemies.length - 1; enemyIndex >= 0; enemyIndex -= 1) {
-        if (this.intersects(this.player, this.enemies[enemyIndex])) {
-          this.enemies.splice(enemyIndex, 1);
-          this.loseLife();
+      for (let bulletIndex = this.enemyBullets.length - 1; bulletIndex >= 0; bulletIndex -= 1) {
+        if (this.intersects(this.player, this.enemyBullets[bulletIndex])) {
+          this.enemyBullets.splice(bulletIndex, 1);
+          this.takeHit();
         }
       }
+
+      for (let powerIndex = this.powerUps.length - 1; powerIndex >= 0; powerIndex -= 1) {
+        const powerUp = this.powerUps[powerIndex];
+        if (!this.intersects(this.player, powerUp)) {
+          continue;
+        }
+
+        this.powerUps.splice(powerIndex, 1);
+        if (powerUp.type === "spread") {
+          this.spreadTimer = 8;
+        } else {
+          this.shield = true;
+        }
+      }
+
+      for (let enemyIndex = this.enemies.length - 1; enemyIndex >= 0; enemyIndex -= 1) {
+        if (this.intersects(this.player, this.enemies[enemyIndex])) {
+          if (this.enemies[enemyIndex].isBoss) {
+            this.takeHit();
+            continue;
+          }
+          this.enemies.splice(enemyIndex, 1);
+          this.takeHit();
+        }
+      }
+    },
+
+    takeHit() {
+      if (this.shield) {
+        this.shield = false;
+        this.updateHud();
+        return;
+      }
+
+      this.loseLife();
     },
 
     loseLife() {
@@ -258,13 +443,25 @@
     updateHud() {
       scoreEl.textContent = `Score: ${this.score}`;
       livesEl.textContent = `Lives: ${this.lives}`;
+      if (this.spreadTimer > 0 && this.shield) {
+        powerEl.textContent = `Power: Spread ${this.spreadTimer.toFixed(1)}s | Shield`;
+      } else if (this.spreadTimer > 0) {
+        powerEl.textContent = `Power: Spread ${this.spreadTimer.toFixed(1)}s`;
+      } else if (this.shield) {
+        powerEl.textContent = "Power: Shield";
+      } else {
+        powerEl.textContent = "Power: None";
+      }
     },
 
     draw() {
       this.drawBackground();
+      this.drawPowerUps();
       this.drawBullets();
+      this.drawEnemyBullets();
       this.drawEnemies();
       this.drawPlayer();
+      this.drawBossHud();
 
       if (this.state === "start") {
         this.drawOverlay("PLANE STRIKE", "Press Space or Enter to start");
@@ -300,12 +497,48 @@
 
       ctx.fillStyle = "#63c7ff";
       ctx.fillRect(p.x + p.w / 2 - 4, p.y + p.h - 10, 8, 13);
+
+      if (this.shield) {
+        ctx.strokeStyle = "rgba(87, 255, 201, 0.82)";
+        ctx.lineWidth = 3;
+        ctx.beginPath();
+        ctx.arc(p.x + p.w / 2, p.y + p.h / 2, 31, 0, Math.PI * 2);
+        ctx.stroke();
+      }
     },
 
     drawBullets() {
       ctx.fillStyle = "#ff2d2d";
       for (const bullet of this.bullets) {
         ctx.fillRect(bullet.x, bullet.y, bullet.w, bullet.h);
+      }
+    },
+
+    drawEnemyBullets() {
+      ctx.fillStyle = "#ff9b42";
+      for (const bullet of this.enemyBullets) {
+        ctx.fillRect(bullet.x, bullet.y, bullet.w, bullet.h);
+      }
+    },
+
+    drawPowerUps() {
+      for (const powerUp of this.powerUps) {
+        const cx = powerUp.x + powerUp.w / 2;
+        const cy = powerUp.y + powerUp.h / 2;
+        const radius = powerUp.w / 2;
+
+        ctx.save();
+        ctx.translate(cx, cy);
+        ctx.rotate(powerUp.spin);
+        ctx.fillStyle = powerUp.type === "spread" ? "#ff4fd8" : "#57ffc9";
+        ctx.beginPath();
+        ctx.moveTo(0, -radius);
+        ctx.lineTo(radius, 0);
+        ctx.lineTo(0, radius);
+        ctx.lineTo(-radius, 0);
+        ctx.closePath();
+        ctx.fill();
+        ctx.restore();
       }
     },
 
@@ -322,6 +555,34 @@
           ctx.fillRect(enemy.x + 5, enemy.y + 6, (enemy.w - 10) * (enemy.hp / enemy.maxHp), 5);
         }
       }
+    },
+
+    drawBossHud() {
+      const boss = this.enemies.find((enemy) => enemy.isBoss);
+      if (!boss) {
+        return;
+      }
+
+      const barX = 60;
+      const barY = 16;
+      const barW = this.width - 120;
+      const barH = 13;
+
+      ctx.fillStyle = "rgba(0, 0, 0, 0.55)";
+      ctx.fillRect(barX, barY, barW, barH);
+      ctx.fillStyle = "#ff4f7d";
+      ctx.fillRect(barX, barY, barW * (boss.hp / boss.maxHp), barH);
+      ctx.strokeStyle = "#ffffff";
+      ctx.lineWidth = 2;
+      ctx.strokeRect(barX, barY, barW, barH);
+
+      ctx.fillStyle = "#ffffff";
+      ctx.textAlign = "center";
+      ctx.textBaseline = "bottom";
+      ctx.font = "700 14px Arial, Helvetica, sans-serif";
+      ctx.fillText(`BOSS HP ${boss.hp}/${boss.maxHp}`, this.width / 2, barY - 2);
+      ctx.textAlign = "left";
+      ctx.textBaseline = "alphabetic";
     },
 
     drawOverlay(title, subtitle) {
