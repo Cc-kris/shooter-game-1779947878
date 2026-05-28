@@ -1,0 +1,8 @@
+{
+  "name": "shooter-game-1779947878",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "test": "echo 'placeholder test' && exit 0"
+  }
+}
